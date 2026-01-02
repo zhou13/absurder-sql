@@ -1914,9 +1914,19 @@ impl Database {
             markers.remove(&normalized_name);
         });
 
-        // Delete from IndexedDB
+        // Delete from IndexedDB without eval/new Function (MV3 CSP safe)
         let idb_name = format!("absurder_{}", normalized_name);
-        let _delete_promise = js_sys::eval(&format!("indexedDB.deleteDatabase('{}')", idb_name))
+        use wasm_bindgen::JsCast;
+        let indexed_db_value = js_sys::Reflect::get(
+            &js_sys::global(),
+            &JsValue::from_str("indexedDB"),
+        )
+        .map_err(|e| JsValue::from_str(&format!("Failed to access indexedDB: {:?}", e)))?;
+        let idb_factory = indexed_db_value
+            .dyn_into::<web_sys::IdbFactory>()
+            .map_err(|_| JsValue::from_str("indexedDB is not available"))?;
+        let _delete_req = idb_factory
+            .delete_database(&idb_name)
             .map_err(|e| JsValue::from_str(&format!("Failed to delete IndexedDB: {:?}", e)))?;
 
         log::info!("Database deleted: {}", normalized_name);

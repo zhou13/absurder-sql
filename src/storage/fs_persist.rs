@@ -475,19 +475,48 @@ impl super::BlockStorage {
                     }
                 };
 
+                fn upgrade_db(event: &web_sys::Event) -> Option<web_sys::IdbDatabase> {
+                    let Some(target) = event.target() else {
+                        log::error!("IDB upgrade missing target");
+                        return None;
+                    };
+                    let request: web_sys::IdbOpenDbRequest = target.unchecked_into();
+                    let db_value = match request.result() {
+                        Ok(db_value) => db_value,
+                        Err(err) => {
+                            log::error!("IDB upgrade result error: {:?}", err);
+                            return None;
+                        }
+                    };
+                    match db_value.dyn_into::<web_sys::IdbDatabase>() {
+                        Ok(db) => Some(db),
+                        Err(_) => {
+                            log::error!("IDB upgrade not a db");
+                            None
+                        }
+                    }
+                }
+
+                fn ensure_block_stores(db: &web_sys::IdbDatabase) {
+                    if !db.object_store_names().contains("blocks") {
+                        let _ = db.create_object_store("blocks");
+                    }
+                    if !db.object_store_names().contains("metadata") {
+                        let _ = db.create_object_store("metadata");
+                    }
+                }
+
                 // Set up upgrade handler to create object stores if needed
-                let upgrade_handler = js_sys::Function::new_no_args(&format!(
-                    "
-                    const db = event.target.result;
-                    if (!db.objectStoreNames.contains('blocks')) {{
-                        db.createObjectStore('blocks');
-                    }}
-                    if (!db.objectStoreNames.contains('metadata')) {{
-                        db.createObjectStore('metadata');
-                    }}
-                    "
-                ));
-                open_req.set_onupgradeneeded(Some(&upgrade_handler));
+                let upgrade_callback =
+                    wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::Event| {
+                        let db = match upgrade_db(&event) {
+                            Some(db) => db,
+                            None => return,
+                        };
+                        ensure_block_stores(&db);
+                    })
+                        as Box<dyn FnMut(_)>);
+                open_req.set_onupgradeneeded(Some(upgrade_callback.as_ref().unchecked_ref()));
 
                 // Use event-based approach for opening database
                 let (tx, rx) = futures::channel::oneshot::channel();
@@ -522,6 +551,7 @@ impl super::BlockStorage {
                 // Keep closures alive
                 success_callback.forget();
                 error_callback.forget();
+                upgrade_callback.forget();
 
                 match db_result {
                     Ok(Ok(db_value)) => {
